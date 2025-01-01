@@ -1,42 +1,29 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
-from PyQt5.QtCore import pyqtSignal, QThread
+from PyQt5.QtCore import pyqtSignal, QThread, QTimer
 from multiprocessing import Process, Queue, Pipe
 import sys,os
-
-from PyQt5.QtWebEngineWidgets import *
-from PyQt5.QtCore import QUrl
-from io import BytesIO
-import base64
-
-from pydub import AudioSegment, effects, utils
-from pydub.utils import which
-AudioSegment.converter = which("ffmpeg")
-
 from datetime import datetime
-import time
 
-from subprocess import Popen, PIPE
 import threading
-
 import math
-import copy
 import traceback
 import importlib
 
-icons = importlib.import_module('compiled-ui.icons')
-database_functions = importlib.import_module("python+.lib.sqlite3-functions")
-convert_time_function = importlib.import_module("python+.lib.convert-time-function")
+icons = importlib.import_module('src.compiled-ui.icons')
+database_functions = importlib.import_module("src.python+.lib.sqlite3-functions")
+convert_time_function = importlib.import_module("src.python+.lib.convert-time-function")
+manage_processes_class = importlib.import_module("src.python+.main-window.manage-processes.manage-processes")
 
 class Deck_1:
 
     def __init__(self,main_self):
         try:
             self.main_self = main_self
-
             self.deck_status = "stopped"
             self.item = None
-            self.put_to_q = False
+            self.put_to_q = True
             self.play_retransmition = False
+
             self.retransmition_ready = False
 
             self.main_self.ui.deck_1_play_or_pause.setStatusTip("Αναπαραγωγή ή παύση αρχείου ή αναμετάδοσης στο deck 1. Πατήστε για αναπαραγωγή")
@@ -48,9 +35,27 @@ class Deck_1:
             self.init_buttons_and_sub_menus()
 
             self.put_to_q = True
+            self.queue.put({'type': 'put_to_q', 'put_to_q': True})
+
+            self.test_timer = QTimer()
+            self.test_timer.timeout.connect(lambda: self.test_deck())
+            self.test_timer.setSingleShot(True)
+            #self.test_timer.start(12000)
         except:
+            self.main_self = main_self
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
+
+    def test_deck(self):
+        item = database_functions.read_sound_file(226)
+        self.load_item(item)
+        self.play_or_pause_clicked()
+
+    def open_error_window(self,error_message):
+        self.timer = QTimer()
+        self.timer.timeout.connect(lambda error=error_message: self.main_self.open_deck_1_error_window(error))
+        self.timer.setSingleShot(True)
+        self.timer.start(50)
 
     def create_process(self):
         try:
@@ -58,63 +63,64 @@ class Deck_1:
 
             self.mother_pipe, self.child_pipe = Pipe()
             self.queue = Queue()
+            self.deck_1_queue = Queue()
 
             self.emitter = Emitter(self.mother_pipe)
-            self.emitter.error_signal.connect(lambda error_message: self.main_self.open_deck_1_error_window(error_message))
-            self.emitter.deck_1_ready.connect(lambda slice: self.deck_1_slice_ready(slice))
+            self.emitter.error_signal.connect(lambda error_message: self.open_error_window(error_message))
+            self.emitter.deck_1_ready.connect(lambda slice: QTimer.singleShot(0, lambda slc=slice: self.deck_1_slice_ready(slc)))
             self.emitter.volume_amplitude.connect(lambda normalized_value: self.display_volume_amplitude(normalized_value))
             self.emitter.current_duration_milliseconds.connect(lambda duration: self.display_current_duration(duration))
             self.emitter.deck_finished.connect(lambda: self.deck_finished())
-            #self.emitter.chunk_number_answer.connect(lambda chunk_number: self.main_self.player_list_instance.chunk_number_answer("deck_1",chunk_number))
+            self.emitter.chunk_number_answer.connect(lambda chunk_number: self.main_self.player_list_instance.chunk_number_answer("deck_1",chunk_number))
             self.emitter.url_check_result.connect(lambda result, retransmition: self.url_check_result(result, retransmition))
             self.emitter.fade_out_start.connect(lambda: self.fade_out_start())
+            #self.emitter.fade_in_stop.connect(lambda: self.main_self.player_list_instance.auto_dj_fade_now_stop())
             self.emitter.start()
 
-            self.child_process = Child_Proc(self.child_pipe, self.queue,self.main_self.sync_processes_instance.condition, self.main_self.sync_processes_instance.frame,self.main_self.sync_processes_instance.quit_event)
+            self.child_process = Child_Proc(self.child_pipe, self.queue,self.deck_1_queue, self.main_self.sync_processes_instance.condition, self.main_self.sync_processes_instance.frame, self.main_self.sync_processes_instance.quit_event,self.main_self.sync_processes_instance.start_condition,self.main_self.sync_processes_instance.start_flag,self.main_self.configuration,self.main_self.sync_processes_instance.continue_condition,self.main_self.sync_processes_instance.continue_flag,self.main_self.sync_processes_instance.flag_condition,self.main_self.sync_processes_instance.deck_1_flag,self.main_self.sync_processes_instance.pre_quit_event)
             self.child_process.start()
 
-            counter = 0
-            for process in self.main_self.manage_processes_instance.processes:
-                if "process_number" in process:
-                    if process["process_number"] == self.process_number:
-                        self.main_self.manage_processes_instance.processes[counter]["pid"] = self.child_process.pid
-                        self.main_self.manage_processes_instance.processes[counter]["start_datetime"] = datetime.now()
-                        self.main_self.manage_processes_instance.processes[counter]["status"] = "in_progress"
-                        break
-                counter += 1
-
-            if self.main_self.manage_proccesses_window_is_open:
-                self.main_self.manage_proccesses_window_support_code.queue.put({"type": "table-update", "processes": self.main_self.manage_processes_instance.processes})
+            manage_processes_class.init_process(self)
         except:
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def deck_1_slice_ready(self,slice):
         try:
-            return None
-            #if self.put_to_q:
-            #    self.main_self.final_slice_instance.queue.put({"type":"slice","slice":slice})
+            pass
         except:
+            self.stop_button_clicked()
+            try:
+                self.emitter.deck_1_ready.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def display_volume_amplitude(self,normalized_value):
         try:
-            if self.deck_status == "stopped":
+            if self.deck_status == "stopped" or self.deck_status == "paused":
                 normalized_value = 0
 
-            frame_width = self.main_self.ui.deck_1_timeline_container_frame_4.geometry().width()
+            frame_width = self.main_self.ui.deck_1_timeline_container_frame.geometry().width()
             stop_red = 255
             stop_green = int(255 * (1 - normalized_value))
             if (stop_green > 255):
                 stop_green = 255
             normalized_value = int(frame_width * normalized_value)
-            self.main_self.ui.deck_1_timeline_pick_frame_4.setGeometry(QtCore.QRect(0, 0, normalized_value, 16))
-            self.main_self.ui.deck_1_timeline_pick_frame_4.setStyleSheet("QFrame{background-color:qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 rgb(255, 255, 0), stop:1 rgb(" + str(stop_red) + ", " + str(stop_green) + ", 0))}")
-            self.main_self.ui.deck_1_timeline_pick_frame_4.update()
+            self.main_self.ui.deck_1_timeline_pick_frame.setGeometry(QtCore.QRect(0, 0, normalized_value, 16))
+            self.main_self.ui.deck_1_timeline_pick_frame.setStyleSheet("QFrame{background-color:qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 rgb(255, 255, 0), stop:1 rgb(" + str(stop_red) + ", " + str(stop_green) + ", 0))}")
+            self.main_self.ui.deck_1_timeline_pick_frame.update()
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            try:
+                self.emitter.volume_amplitude.disconnect()
+            except:
+                pass
+            self.stop_button_clicked(disable_extra_plays=True,set_to_zero=False)
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def display_current_duration(self,duration):
         try:
@@ -130,8 +136,15 @@ class Deck_1:
             else:
                 self.main_self.ui.deck_1_duration.setText("00:00:00/-")
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            try:
+                self.emitter.current_duration_milliseconds.disconnect()
+            except:
+                pass
+            self.stop_button_clicked(disable_extra_plays=True, set_to_zero=False)
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def deck_finished(self):
         try:
@@ -142,10 +155,16 @@ class Deck_1:
             icon1.addPixmap(QtGui.QPixmap(":/rest-icons/assets/icons/rest-icons/play-song.png"), QtGui.QIcon.Normal,QtGui.QIcon.Off)
             self.main_self.ui.deck_1_play_or_pause.setIcon(icon1)
 
-            # self.player_list_instance.deck_finished("deck_1")
+            #self.main_self.player_list_instance.deck_finished("deck_1")
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            try:
+                self.emitter.deck_finished.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def url_check_result(self, result, retransmition):
         try:
@@ -164,71 +183,137 @@ class Deck_1:
                 if self.play_retransmition:
                     self.play_or_pause_clicked()
         except Exception as e:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def fade_out_start(self):
         try:
-            return None
+            pass
             #if self.main_self.player_list_instance.player_list_settings["auto_dj"]:
             #    self.main_self.player_list_instance.dj_fade_out_start()
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def init_buttons_and_sub_menus(self):
+        # deck stop button
+        self.main_self.ui.deck_1_stop.clicked.connect(lambda state:self.stop_button_clicked())
+
+        # deck play or pause button
+        self.main_self.ui.deck_1_play_or_pause.clicked.connect(lambda state:self.play_or_pause_clicked())
+
+        # deck timeline
+        self.main_self.ui.deck_1_timeslider.sliderPressed.connect(lambda:self.deck_timeline_slider_pressed())
+        self.main_self.ui.deck_1_timeslider.sliderMoved.connect(lambda value:self.deck_timeline_slider_moved(value))
+        self.main_self.ui.deck_1_timeslider.sliderReleased.connect(lambda:self.deck_timeline_slider_released())
+        self.action_3_or_4_on = False
+        self.main_self.ui.deck_1_timeslider.actionTriggered.connect(lambda action: self.deck_timeline_slider_triggered(action))
+
+        # deck volume menu
+        self.create_menu_for_volume()
+
+        # deck pan menu
+        self.create_menu_for_pan()
+
+        # deck normalize menu
+        self.create_menu_for_normalize()
+
+        # deck filter menu
+        self.create_menu_for_filter()
+
+        self.main_self.ui.deck_1_play_or_pause.setFixedWidth(self.main_self.ui.deck_1_volume.sizeHint().width())
+        self.main_self.ui.deck_1_stop.setFixedWidth(self.main_self.ui.deck_1_volume.sizeHint().width())
+
+    def deck_timeline_slider_triggered(self,action):
         try:
-            # deck stop button
-            self.main_self.ui.deck_1_stop.clicked.connect(lambda state:self.stop_button_clicked())
-
-            # deck play or pause button
-            self.main_self.ui.deck_1_play_or_pause.clicked.connect(lambda state:self.play_or_pause_clicked())
-
-            # deck timeline
-            self.main_self.ui.deck_1_timeslider.sliderReleased.connect(lambda:self.deck_timeline_slider_moved())
-
-            # deck volume menu
-            self.create_menu_for_volume()
-
-            # deck pan menu
-            self.create_menu_for_pan()
-
-            # deck normalize menu
-            self.create_menu_for_normalize()
-
-            # deck filter menu
-            self.create_menu_for_filter()
-
-            self.main_self.ui.deck_1_play_or_pause.setFixedWidth(self.main_self.ui.deck_1_volume.sizeHint().width())
-            self.main_self.ui.deck_1_stop.setFixedWidth(self.main_self.ui.deck_1_volume.sizeHint().width())
+            if action == 3 or action == 4:
+                if self.action_3_or_4_on == False:
+                    self.action_3_or_4_on = True
+                    try:
+                        self.emitter.current_duration_milliseconds.disconnect()
+                    except:
+                        pass
+                    # Use QTimer to delay the action until after the value update
+                    QTimer.singleShot(100, self.process_slider_value)
         except:
+            self.stop_button_clicked()
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            try:
+                self.main_self.ui.deck_1_timeslider.actionTriggered.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
-    def stop_button_clicked(self,disable_extra_plays=True):
+    def process_slider_value(self):
         try:
-            #if disable_extra_plays:
-            #    self.main_self.player_list_instance.time_collection_play_in_progress = False
-            #    self.main_self.player_list_instance.playlist_play_in_progress = False
+            value = self.main_self.ui.deck_1_timeslider.value()
+            self.main_self.ui.deck_1_timeslider.setSliderPosition(value)
+            self.display_current_duration(value)
+            slider_value = self.main_self.ui.deck_1_timeslider.value()
+            if (self.deck_status != "stopped"):
+                chunk_number = round(slider_value / self.main_self.configuration["packet_time_ms"])
+                self.queue.put({"type": "duration_changed", "chunk_number": chunk_number})
+            else:
+                self.main_self.ui.deck_1_timeslider.blockSignals(True)
+                self.main_self.ui.deck_1_timeslider.setProperty("value", 0)
+                self.main_self.ui.deck_1_timeslider.blockSignals(False)
+            self.action_3_or_4_on = False
+            self.emitter.current_duration_milliseconds.connect(lambda duration: self.display_current_duration(duration))
+        except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            try:
+                self.main_self.ui.deck_1_timeslider.actionTriggered.disconnect()
+            except:
+                pass
+            self.stop_button_clicked()
+            error_message = traceback.format_exc()
+            self.open_error_window(error_message)
+
+    def stop_button_clicked(self,disable_extra_plays=True,set_to_zero=True):
+        try:
+            self.play_retransmition = False
+            try:
+                pass
+                #if disable_extra_plays:
+                #    self.main_self.player_list_instance.time_collection_play_in_progress = False
+                #    self.main_self.player_list_instance.playlist_play_in_progress = False
+            except:
+                pass
+
             self.deck_status = "stopped"
             self.queue.put({"type":"new-status","status":self.deck_status})
-            self.display_current_duration(0)
-            self.display_volume_amplitude(0)
+
+            if set_to_zero:
+                self.display_current_duration(0)
+                self.display_volume_amplitude(0)
+
+
             icon1 = QtGui.QIcon()
             icon1.addPixmap(QtGui.QPixmap(":/rest-icons/assets/icons/rest-icons/play-song.png"), QtGui.QIcon.Normal,QtGui.QIcon.Off)
             self.main_self.ui.deck_1_play_or_pause.setIcon(icon1)
+            self.main_self.ui.deck_1_play_or_pause.setStatusTip("Αναπαραγωγή ή παύση αρχείου ή αναμετάδοσης στο deck 1. Πατήστε για παύση")
 
             self.main_self.ui.deck_1_timeslider.blockSignals(True)
             self.main_self.ui.deck_1_timeslider.setValue(0)
             self.main_self.ui.deck_1_timeslider.blockSignals(False)
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def play_or_pause_clicked(self):
         try:
             if self.item == None:
                 return None
+
             if self.deck_status == "playing":
                 self.deck_status = "paused"
 
@@ -237,113 +322,151 @@ class Deck_1:
                 icon1 = QtGui.QIcon()
                 icon1.addPixmap(QtGui.QPixmap(":/rest-icons/assets/icons/rest-icons/play-song.png"), QtGui.QIcon.Normal,QtGui.QIcon.Off)
                 self.main_self.ui.deck_1_play_or_pause.setIcon(icon1)
-
+                self.display_volume_amplitude(0)
             else:
                 self.deck_status = "playing"
-                self.main_self.ui.deck_1_play_or_pause.setStatusTip(
-                    "Αναπαραγωγή ή παύση αρχείου ή αναμετάδοσης στο deck 1. Πατήστε για παύση")
+                self.main_self.ui.deck_1_play_or_pause.setStatusTip("Αναπαραγωγή ή παύση αρχείου ή αναμετάδοσης στο deck 1. Πατήστε για παύση")
 
                 icon1 = QtGui.QIcon()
                 icon1.addPixmap(QtGui.QPixmap(":/rest-icons/assets/icons/rest-icons/pause-song.png"), QtGui.QIcon.Normal,QtGui.QIcon.Off)
                 self.main_self.ui.deck_1_play_or_pause.setIcon(icon1)
             self.queue.put({"type":"new-status","status":self.deck_status})
         except:
+            self.stop_button_clicked()
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
-    def deck_timeline_slider_moved(self):
+    def deck_timeline_slider_pressed(self):
         try:
-            value = self.main_self.ui.deck_1_timeslider.value()
-            if (self.deck_status != "stopped"):
-                # calculate new chunk_number
-                chunk_number = round(value / 125)
-                self.queue.put({"type": "duration_changed", "chunk_number": chunk_number})
-            else:
-                self.main_self.ui.deck_1_timeslider.setProperty("value", 0)
+            self.emitter.current_duration_milliseconds.disconnect()
         except:
+            self.main_self.ui.deck_1_timeslider.blockSignals(True)
+            self.stop_button_clicked()
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
+
+    def deck_timeline_slider_moved(self,value):
+        try:
+            if self.action_3_or_4_on == False:
+                self.display_current_duration(value)
+        except:
+            self.main_self.ui.deck_1_timeslider.blockSignals(True)
+            self.stop_button_clicked()
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            error_message = traceback.format_exc()
+            self.open_error_window(error_message)
+
+    def deck_timeline_slider_released(self):
+        try:
+            if self.action_3_or_4_on == False:
+                value = self.main_self.ui.deck_1_timeslider.value()
+                if (self.deck_status != "stopped"):
+                    chunk_number = round(value / self.main_self.configuration["packet_time_ms"])
+                    self.queue.put({"type": "duration_changed", "chunk_number": chunk_number})
+                else:
+                    self.main_self.ui.deck_1_timeslider.blockSignals(True)
+                    self.main_self.ui.deck_1_timeslider.setProperty("value", 0)
+                    self.main_self.ui.deck_1_timeslider.blockSignals(False)
+
+                self.emitter.current_duration_milliseconds.connect(lambda duration: self.display_current_duration(duration))
+        except:
+            self.main_self.ui.deck_1_timeslider.blockSignals(True)
+            self.stop_button_clicked()
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            error_message = traceback.format_exc()
+            self.open_error_window(error_message)
 
     def create_menu_for_volume(self):
-        try:
-            self.menu_for_volume = QtWidgets.QMenu(self.main_self.ui.deck_1_volume)
-            self.main_self.ui.deck_1_volume.setMenu(self.menu_for_volume)
+        self.menu_for_volume = QtWidgets.QMenu(self.main_self.ui.deck_1_volume)
+        self.main_self.ui.deck_1_volume.setMenu(self.menu_for_volume)
 
-            self.volume_frame = Custom_QFrame(self.menu_for_volume)
-            self.volume_frame.installEventFilter(self.volume_frame)
-            self.volume_frame.setFixedWidth(600)
-            self.volume_frame.setStyleSheet("QFrame{border:1px solid #ABABAB;background-color:rgb(253,253,253);}")
-            self.volume_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-            self.volume_frame.setFrameShadow(QtWidgets.QFrame.Raised)
-            self.volume_frame.setObjectName("volume_frame")
+        self.volume_frame = Custom_QFrame(self.menu_for_volume)
+        self.volume_frame.installEventFilter(self.volume_frame)
+        self.volume_frame.setFixedWidth(600)
+        self.volume_frame.setStyleSheet("QFrame{border:1px solid #ABABAB;background-color:rgb(253,253,253);}")
+        self.volume_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.volume_frame.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.volume_frame.setObjectName("volume_frame")
 
-            self.volume_horizontalLayout = QtWidgets.QHBoxLayout(self.volume_frame)
-            self.volume_horizontalLayout.setObjectName("volume_horizontalLayout")
+        self.volume_horizontalLayout = QtWidgets.QHBoxLayout(self.volume_frame)
+        self.volume_horizontalLayout.setObjectName("volume_horizontalLayout")
 
-            self.volume_label_1 = QtWidgets.QLabel(self.volume_frame)
-            self.volume_label_1.setStyleSheet("QLabel{border:none;}")
-            self.volume_label_1.setObjectName("volume_label_1")
-            self.volume_horizontalLayout.addWidget(self.volume_label_1)
+        self.volume_label_1 = QtWidgets.QLabel(self.volume_frame)
+        self.volume_label_1.setStyleSheet("QLabel{border:none;}")
+        self.volume_label_1.setObjectName("volume_label_1")
+        self.volume_horizontalLayout.addWidget(self.volume_label_1)
 
-            self.volume_slider = QtWidgets.QSlider(self.volume_frame)
-            self.volume_slider.setMaximum(200)
-            self.volume_slider.setProperty("value", 100)
-            self.volume_slider.setOrientation(QtCore.Qt.Horizontal)
-            self.volume_slider.setObjectName("volume_slider")
-            self.volume_horizontalLayout.addWidget(self.volume_slider)
+        self.volume_slider = QtWidgets.QSlider(self.volume_frame)
+        self.volume_slider.setMaximum(200)
+        self.volume_slider.setProperty("value", 100)
+        self.volume_slider.setOrientation(QtCore.Qt.Horizontal)
+        self.volume_slider.setObjectName("volume_slider")
+        self.volume_horizontalLayout.addWidget(self.volume_slider)
 
-            self.volume_label_2 = QtWidgets.QLabel(self.volume_frame)
-            self.volume_label_2.setObjectName("volume_label")
-            self.volume_label_2.setStyleSheet("QLabel{border:none;}")
-            self.volume_horizontalLayout.addWidget(self.volume_label_2)
+        self.volume_label_2 = QtWidgets.QLabel(self.volume_frame)
+        self.volume_label_2.setObjectName("volume_label_2")
+        self.volume_label_2.setStyleSheet("QLabel{border:none;}")
+        self.volume_horizontalLayout.addWidget(self.volume_label_2)
 
-            self.volume_reset = QtWidgets.QPushButton(self.volume_frame)
-            self.volume_reset.setMinimumSize(QtCore.QSize(0, 29))
-            self.volume_reset.setObjectName("volume_reset")
-            self.volume_horizontalLayout.addWidget(self.volume_reset)
+        self.volume_reset = QtWidgets.QPushButton(self.volume_frame)
+        self.volume_reset.setMinimumSize(QtCore.QSize(0, 29))
+        self.volume_reset.setObjectName("volume_reset")
+        self.volume_horizontalLayout.addWidget(self.volume_reset)
 
-            self.volume_label_1.setText("Ρύθμιση έντασης ήχου:")
-            self.volume_label_2.setText(str(100)+"/200")
-            self.volume_reset.setText("Επαναφορά (100/200)")
+        self.volume_label_1.setText("Ρύθμιση έντασης ήχου:")
+        self.volume_label_2.setText(str(100)+"/200")
+        self.volume_reset.setText("Επαναφορά (100/200)")
 
-            # on sound volume changed
-            self.volume_slider.valueChanged.connect(lambda slider_value: self.volume_changed(slider_value))
+        # on sound volume changed
+        self.volume_slider.valueChanged.connect(lambda slider_value: self.volume_changed(slider_value))
 
-            # on sound volume apply new value
-            self.volume_slider.sliderReleased.connect(lambda: self.volume_released())
+        # on sound volume apply new value
+        self.volume_slider.sliderReleased.connect(lambda: self.volume_released())
 
-            # on sound volume pressed
-            self.volume_slider.actionTriggered.connect(lambda action: self.volume_action_triggered(action))
+        # on sound volume pressed
+        self.volume_slider.actionTriggered.connect(lambda action: self.volume_action_triggered(action))
 
-            # on sound volume reset
-            self.volume_reset.clicked.connect(lambda state: self.volume_resetted())
+        # on sound volume reset
+        self.volume_reset.clicked.connect(lambda state: self.volume_resetted())
 
-            volume_widget = QtWidgets.QWidgetAction(self.menu_for_volume)
-            volume_widget.setDefaultWidget(self.volume_frame)
-            self.menu_for_volume.addAction(volume_widget)
-        except:
-            error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+        volume_widget = QtWidgets.QWidgetAction(self.menu_for_volume)
+        volume_widget.setDefaultWidget(self.volume_frame)
+        self.menu_for_volume.addAction(volume_widget)
 
     def volume_changed(self, slider_value):
         try:
             self.volume_label_2.setText(str(slider_value) + "/200")
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.volume_slider.valueChanged.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def volume_released(self):
         try:
             slider_value = self.volume_slider.value()
             self.queue.put({"type": "volume", "value_base_100": slider_value})
-
-            #page 4
-            #reload player list items
-            #self.main_self.ui.main_player_list_treeWidget.clear()
-            #self.main_self.player_list_instance.player_list_queue.put({"type": "get-player-list"})
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.volume_slider.sliderReleased.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def volume_action_triggered(self, action):
         try:
@@ -353,98 +476,117 @@ class Deck_1:
                 self.timer_2.setSingleShot(True)
                 self.timer_2.start(500)
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.volume_slider.actionTriggered.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def volume_resetted(self):
         try:
             self.volume_slider.setValue(100)
             self.volume_label_2.setText("100/200")
             self.queue.put({"type": "volume", "value_base_100": 100})
-
-            #page 4
-            #reload player list items
-            #self.main_self.ui.main_player_list_treeWidget.clear()
-            #self.main_self.player_list_instance.player_list_queue.put({"type": "get-player-list"})
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.volume_reset.clicked.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def create_menu_for_pan(self):
-        try:
-            self.menu_for_pan = QtWidgets.QMenu(self.main_self.ui.deck_1_pan)
-            self.main_self.ui.deck_1_pan.setMenu(self.menu_for_pan)
+        self.menu_for_pan = QtWidgets.QMenu(self.main_self.ui.deck_1_pan)
+        self.main_self.ui.deck_1_pan.setMenu(self.menu_for_pan)
 
-            self.pan_frame = Custom_QFrame(self.menu_for_pan)
-            self.pan_frame.installEventFilter(self.pan_frame)
-            self.pan_frame.setFixedWidth(600)
-            self.pan_frame.setStyleSheet("QFrame{background-color:rgb(253,253,253);border:1px solid #ABABAB;}")
-            self.pan_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-            self.pan_frame.setFrameShadow(QtWidgets.QFrame.Raised)
-            self.pan_frame.setObjectName("pan_frame")
+        self.pan_frame = Custom_QFrame(self.menu_for_pan)
+        self.pan_frame.installEventFilter(self.pan_frame)
+        self.pan_frame.setFixedWidth(600)
+        self.pan_frame.setStyleSheet("QFrame{background-color:rgb(253,253,253);border:1px solid #ABABAB;}")
+        self.pan_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.pan_frame.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.pan_frame.setObjectName("pan_frame")
 
-            self.pan_horizontalLayout = QtWidgets.QHBoxLayout(self.pan_frame)
-            self.pan_horizontalLayout.setObjectName("pan_horizontalLayout")
+        self.pan_horizontalLayout = QtWidgets.QHBoxLayout(self.pan_frame)
+        self.pan_horizontalLayout.setObjectName("pan_horizontalLayout")
 
-            self.pan_label_1 = QtWidgets.QLabel(self.pan_frame)
-            self.pan_label_1.setObjectName("pan_label_1")
-            self.pan_label_1.setStyleSheet("QLabel{border:none;}")
-            self.pan_horizontalLayout.addWidget(self.pan_label_1)
+        self.pan_label_1 = QtWidgets.QLabel(self.pan_frame)
+        self.pan_label_1.setObjectName("pan_label_1")
+        self.pan_label_1.setStyleSheet("QLabel{border:none;}")
+        self.pan_horizontalLayout.addWidget(self.pan_label_1)
 
-            self.pan_slider = QtWidgets.QSlider(self.pan_frame)
-            self.pan_slider.setMinimum(-100)
-            self.pan_slider.setMaximum(100)
-            self.pan_slider.setProperty("value", 0)
-            self.pan_slider.setOrientation(QtCore.Qt.Horizontal)
-            self.pan_slider.setObjectName("pan_slider")
-            self.pan_horizontalLayout.addWidget(self.pan_slider)
+        self.pan_slider = QtWidgets.QSlider(self.pan_frame)
+        self.pan_slider.setMinimum(-100)
+        self.pan_slider.setMaximum(100)
+        self.pan_slider.setProperty("value", 0)
+        self.pan_slider.setOrientation(QtCore.Qt.Horizontal)
+        self.pan_slider.setObjectName("pan_slider")
+        self.pan_horizontalLayout.addWidget(self.pan_slider)
 
-            self.pan_label_2 = QtWidgets.QLabel(self.pan_frame)
-            self.pan_label_2.setObjectName("pan_label_2")
-            self.pan_label_2.setStyleSheet("QLabel{border:none;}")
-            self.pan_horizontalLayout.addWidget(self.pan_label_2)
+        self.pan_label_2 = QtWidgets.QLabel(self.pan_frame)
+        self.pan_label_2.setObjectName("pan_label_2")
+        self.pan_label_2.setStyleSheet("QLabel{border:none;}")
+        self.pan_horizontalLayout.addWidget(self.pan_label_2)
 
-            self.pan_reset = QtWidgets.QPushButton(self.pan_frame)
-            self.pan_reset.setObjectName("pan_reset")
-            self.pan_horizontalLayout.addWidget(self.pan_reset)
+        self.pan_reset = QtWidgets.QPushButton(self.pan_frame)
+        self.pan_reset.setObjectName("pan_reset")
+        self.pan_horizontalLayout.addWidget(self.pan_reset)
 
-            self.pan_label_1.setText("Ρύθμιση στερεοφωνικής ισοστάθμισης:")
-            self.pan_label_2.setText(str(0))
-            self.pan_reset.setText("Επαναφορά 0")
+        self.pan_label_1.setText("Ρύθμιση στερεοφωνικής ισοστάθμισης:")
+        self.pan_label_2.setText(str(0))
+        self.pan_reset.setText("Επαναφορά 0")
 
-            # on sound pan changed
-            self.pan_slider.valueChanged.connect(lambda slider_value: self.pan_changed(slider_value))
+        # on sound pan changed
+        self.pan_slider.valueChanged.connect(lambda slider_value: self.pan_changed(slider_value))
 
-            # on sound pan apply new value
-            self.pan_slider.sliderReleased.connect(lambda: self.pan_released())
+        # on sound pan apply new value
+        self.pan_slider.sliderReleased.connect(lambda: self.pan_released())
 
-            # on sound pan pressed
-            self.pan_slider.actionTriggered.connect(lambda action: self.pan_action_triggered(action))
+        # on sound pan pressed
+        self.pan_slider.actionTriggered.connect(lambda action: self.pan_action_triggered(action))
 
-            # on sound volume reset
-            self.pan_reset.clicked.connect(lambda state: self.pan_resetted())
+        # on sound volume reset
+        self.pan_reset.clicked.connect(lambda state: self.pan_resetted())
 
-            pan_widget = QtWidgets.QWidgetAction(self.menu_for_pan)
-            pan_widget.setDefaultWidget(self.pan_frame)
-            self.menu_for_pan.addAction(pan_widget)
-        except:
-            error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+        pan_widget = QtWidgets.QWidgetAction(self.menu_for_pan)
+        pan_widget.setDefaultWidget(self.pan_frame)
+        self.menu_for_pan.addAction(pan_widget)
 
     def pan_changed(self, slider_value):
         try:
             self.pan_label_2.setText(str(slider_value))
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.pan_slider.valueChanged.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def pan_released(self):
         try:
             slider_value = self.pan_slider.value()
             self.queue.put({"type": "pan", "pan_value": slider_value})
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.pan_slider.sliderReleased.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def pan_action_triggered(self, action):
         try:
@@ -454,8 +596,15 @@ class Deck_1:
                 self.timer_2.setSingleShot(True)
                 self.timer_2.start(500)
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.pan_slider.actionTriggered.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def pan_resetted(self):
         try:
@@ -463,42 +612,45 @@ class Deck_1:
             self.pan_label_2.setText("0")
             self.queue.put({"type": "pan", "pan_value": 0})
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.pan_reset.clicked.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def create_menu_for_normalize(self):
-        try:
-            self.menu_for_normalize = QtWidgets.QMenu(self.main_self.ui.deck_1_normalize)
-            self.main_self.ui.deck_1_normalize.setMenu(self.menu_for_normalize)
+        self.menu_for_normalize = QtWidgets.QMenu(self.main_self.ui.deck_1_normalize)
+        self.main_self.ui.deck_1_normalize.setMenu(self.menu_for_normalize)
 
-            self.normalize_frame = Custom_QFrame(self.menu_for_normalize)
-            self.normalize_frame.installEventFilter(self.normalize_frame)
-            self.normalize_frame.setFixedWidth(300)
-            self.normalize_frame.setStyleSheet("QFrame{background-color:rgb(253,253,253);border:1px solid #ABABAB;}")
-            self.normalize_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-            self.normalize_frame.setFrameShadow(QtWidgets.QFrame.Raised)
-            self.normalize_frame.setObjectName("normalize_frame")
+        self.normalize_frame = Custom_QFrame(self.menu_for_normalize)
+        self.normalize_frame.installEventFilter(self.normalize_frame)
+        self.normalize_frame.setFixedWidth(300)
+        self.normalize_frame.setStyleSheet("QFrame{background-color:rgb(253,253,253);border:1px solid #ABABAB;}")
+        self.normalize_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.normalize_frame.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.normalize_frame.setObjectName("normalize_frame")
 
-            self.normalize_horizontalLayout = QtWidgets.QHBoxLayout(self.normalize_frame)
-            self.normalize_horizontalLayout.setObjectName("normalize_horizontalLayout")
+        self.normalize_horizontalLayout = QtWidgets.QHBoxLayout(self.normalize_frame)
+        self.normalize_horizontalLayout.setObjectName("normalize_horizontalLayout")
 
-            self.normalize_checkBox = QtWidgets.QCheckBox(self.normalize_frame)
-            self.normalize_checkBox.setObjectName("normalize_checkBox")
-            self.normalize_checkBox.setStyleSheet("border:none;")
-            self.normalize_checkBox.setCheckState(QtCore.Qt.Unchecked)
-            self.normalize_horizontalLayout.addWidget(self.normalize_checkBox)
+        self.normalize_checkBox = QtWidgets.QCheckBox(self.normalize_frame)
+        self.normalize_checkBox.setObjectName("normalize_checkBox")
+        self.normalize_checkBox.setStyleSheet("border:none;")
+        self.normalize_checkBox.setCheckState(QtCore.Qt.Unchecked)
+        self.normalize_horizontalLayout.addWidget(self.normalize_checkBox)
 
-            self.normalize_checkBox.setText("Κανονικοποίηση")
+        self.normalize_checkBox.setText("Κανονικοποίηση")
 
-            # on normalize changed
-            self.normalize_checkBox.stateChanged.connect(lambda new_state: self.normalize_changed(new_state))
+        # on normalize changed
+        self.normalize_checkBox.stateChanged.connect(lambda new_state: self.normalize_changed(new_state))
 
-            normalize_widget = QtWidgets.QWidgetAction(self.menu_for_normalize)
-            normalize_widget.setDefaultWidget(self.normalize_frame)
-            self.menu_for_normalize.addAction(normalize_widget)
-        except:
-            error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+        normalize_widget = QtWidgets.QWidgetAction(self.menu_for_normalize)
+        normalize_widget.setDefaultWidget(self.normalize_frame)
+        self.menu_for_normalize.addAction(normalize_widget)
 
     def normalize_changed(self, new_state):
         try:
@@ -507,168 +659,185 @@ class Deck_1:
             else:
                 self.queue.put({"type": "is_normalized", "boolean_value": 1})
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.normalize_checkBox.stateChanged.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def create_menu_for_filter(self):
-        try:
-            self.menu_for_filter = QtWidgets.QMenu(self.main_self.ui.deck_1_filter)
-            self.main_self.ui.deck_1_filter.setMenu(self.menu_for_filter)
+        self.menu_for_filter = QtWidgets.QMenu(self.main_self.ui.deck_1_filter)
+        self.main_self.ui.deck_1_filter.setMenu(self.menu_for_filter)
 
-            self.filter_frame = Custom_QFrame(self.menu_for_filter)
-            self.filter_frame.installEventFilter(self.filter_frame)
-            self.filter_frame.setStyleSheet("QFrame{border:1px solid #ABABAB;background-color:rgb(253,253,253);}")
-            self.filter_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-            self.filter_frame.setFrameShadow(QtWidgets.QFrame.Raised)
-            self.filter_frame.setObjectName("filter_frame")
+        self.filter_frame = Custom_QFrame(self.menu_for_filter)
+        self.filter_frame.installEventFilter(self.filter_frame)
+        self.filter_frame.setStyleSheet("QFrame{border:1px solid #ABABAB;background-color:rgb(253,253,253);}")
+        self.filter_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.filter_frame.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.filter_frame.setObjectName("filter_frame")
 
-            self.filter_horizontalLayout = QtWidgets.QHBoxLayout(self.filter_frame)
-            self.filter_horizontalLayout.setObjectName("filter_horizontalLayout")
+        self.filter_horizontalLayout = QtWidgets.QHBoxLayout(self.filter_frame)
+        self.filter_horizontalLayout.setObjectName("filter_horizontalLayout")
 
-            self.filter_label_7 = QtWidgets.QLabel(self.filter_frame)
-            sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
-            sizePolicy.setHorizontalStretch(0)
-            sizePolicy.setVerticalStretch(0)
-            sizePolicy.setHeightForWidth(self.filter_label_7.sizePolicy().hasHeightForWidth())
-            self.filter_label_7.setSizePolicy(sizePolicy)
-            self.filter_label_7.setMinimumSize(QtCore.QSize(0, 0))
-            self.filter_label_7.setMaximumSize(QtCore.QSize(16777215, 16777215))
-            self.filter_label_7.setStyleSheet("QLabel{border:none;}")
-            self.filter_label_7.setWordWrap(True)
-            self.filter_label_7.setObjectName("filter_label_7")
-            self.filter_horizontalLayout.addWidget(self.filter_label_7)
+        self.filter_label_7 = QtWidgets.QLabel(self.filter_frame)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        sizePolicy.setHorizontalStretch(0)
+        sizePolicy.setVerticalStretch(0)
+        sizePolicy.setHeightForWidth(self.filter_label_7.sizePolicy().hasHeightForWidth())
+        self.filter_label_7.setSizePolicy(sizePolicy)
+        self.filter_label_7.setMinimumSize(QtCore.QSize(0, 0))
+        self.filter_label_7.setMaximumSize(QtCore.QSize(16777215, 16777215))
+        self.filter_label_7.setStyleSheet("QLabel{border:none;}")
+        self.filter_label_7.setWordWrap(True)
+        self.filter_label_7.setObjectName("filter_label_7")
+        self.filter_horizontalLayout.addWidget(self.filter_label_7)
 
-            self.filter_frame_13 = QtWidgets.QFrame(self.filter_frame)
-            self.filter_frame_13.setStyleSheet("QFrame{border:none;}")
-            self.filter_frame_13.setFrameShape(QtWidgets.QFrame.StyledPanel)
-            self.filter_frame_13.setFrameShadow(QtWidgets.QFrame.Raised)
-            self.filter_frame_13.setObjectName("filter_frame_13")
+        self.filter_frame_13 = QtWidgets.QFrame(self.filter_frame)
+        self.filter_frame_13.setStyleSheet("QFrame{border:none;}")
+        self.filter_frame_13.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.filter_frame_13.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.filter_frame_13.setObjectName("filter_frame_13")
 
-            self.filter_gridLayout_4 = QtWidgets.QGridLayout(self.filter_frame_13)
-            self.filter_gridLayout_4.setContentsMargins(0, 0, 0, 0)
-            self.filter_gridLayout_4.setObjectName("filter_gridLayout_4")
+        self.filter_gridLayout_4 = QtWidgets.QGridLayout(self.filter_frame_13)
+        self.filter_gridLayout_4.setContentsMargins(0, 0, 0, 0)
+        self.filter_gridLayout_4.setObjectName("filter_gridLayout_4")
 
-            self.filter_high_frequency = QtWidgets.QSpinBox(self.filter_frame_13)
-            self.filter_high_frequency.setMinimumSize(QtCore.QSize(0, 29))
-            self.filter_high_frequency.setMinimum(20)
-            self.filter_high_frequency.setMaximum(20000)
-            self.filter_high_frequency.setSingleStep(100)
-            self.filter_high_frequency.setValue(20000)
-            self.filter_high_frequency.setObjectName("filter_high_frequency")
-            self.filter_gridLayout_4.addWidget(self.filter_high_frequency, 1, 1, 1, 1)
+        self.filter_high_frequency = QtWidgets.QSpinBox(self.filter_frame_13)
+        self.filter_high_frequency.setMinimumSize(QtCore.QSize(0, 29))
+        self.filter_high_frequency.setMinimum(20)
+        self.filter_high_frequency.setMaximum(20000)
+        self.filter_high_frequency.setSingleStep(100)
+        self.filter_high_frequency.setValue(20000)
+        self.filter_high_frequency.setObjectName("filter_high_frequency")
+        self.filter_gridLayout_4.addWidget(self.filter_high_frequency, 1, 1, 1, 1)
 
-            self.filter_label_11 = QtWidgets.QLabel(self.filter_frame_13)
-            sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
-            sizePolicy.setHorizontalStretch(0)
-            sizePolicy.setVerticalStretch(0)
-            sizePolicy.setHeightForWidth(self.filter_label_11.sizePolicy().hasHeightForWidth())
-            self.filter_label_11.setSizePolicy(sizePolicy)
-            self.filter_label_11.setObjectName("filter_label_11")
-            self.filter_gridLayout_4.addWidget(self.filter_label_11, 1, 0, 1, 1)
+        self.filter_label_11 = QtWidgets.QLabel(self.filter_frame_13)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        sizePolicy.setHorizontalStretch(0)
+        sizePolicy.setVerticalStretch(0)
+        sizePolicy.setHeightForWidth(self.filter_label_11.sizePolicy().hasHeightForWidth())
+        self.filter_label_11.setSizePolicy(sizePolicy)
+        self.filter_label_11.setObjectName("filter_label_11")
+        self.filter_gridLayout_4.addWidget(self.filter_label_11, 1, 0, 1, 1)
 
-            self.filter_label_13 = QtWidgets.QLabel(self.filter_frame_13)
-            self.filter_label_13.setMinimumSize(QtCore.QSize(60, 0))
-            self.filter_label_13.setMaximumSize(QtCore.QSize(50, 16777215))
-            self.filter_label_13.setAlignment(QtCore.Qt.AlignCenter)
-            self.filter_label_13.setObjectName("filter_label_13")
-            self.filter_gridLayout_4.addWidget(self.filter_label_13, 1, 2, 1, 1)
+        self.filter_label_13 = QtWidgets.QLabel(self.filter_frame_13)
+        self.filter_label_13.setMinimumSize(QtCore.QSize(60, 0))
+        self.filter_label_13.setMaximumSize(QtCore.QSize(50, 16777215))
+        self.filter_label_13.setAlignment(QtCore.Qt.AlignCenter)
+        self.filter_label_13.setObjectName("filter_label_13")
+        self.filter_gridLayout_4.addWidget(self.filter_label_13, 1, 2, 1, 1)
 
-            self.filter_reset_filter = QtWidgets.QPushButton(self.filter_frame_13)
-            sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Maximum)
-            sizePolicy.setHorizontalStretch(0)
-            sizePolicy.setVerticalStretch(0)
-            sizePolicy.setHeightForWidth(self.filter_reset_filter.sizePolicy().hasHeightForWidth())
-            self.filter_reset_filter.setSizePolicy(sizePolicy)
-            self.filter_reset_filter.setMinimumSize(QtCore.QSize(260, 29))
-            self.filter_reset_filter.setMaximumSize(QtCore.QSize(205, 16777215))
-            icon = QtGui.QIcon()
-            icon.addPixmap(QtGui.QPixmap(":/menu-icons/assets/icons/menu-icons/menu-1/select-default.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
-            self.filter_reset_filter.setIcon(icon)
-            self.filter_reset_filter.setObjectName("filter_reset_filter")
-            self.filter_gridLayout_4.addWidget(self.filter_reset_filter, 1, 3, 1, 1)
+        self.filter_reset_filter = QtWidgets.QPushButton(self.filter_frame_13)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Maximum)
+        sizePolicy.setHorizontalStretch(0)
+        sizePolicy.setVerticalStretch(0)
+        sizePolicy.setHeightForWidth(self.filter_reset_filter.sizePolicy().hasHeightForWidth())
+        self.filter_reset_filter.setSizePolicy(sizePolicy)
+        self.filter_reset_filter.setMinimumSize(QtCore.QSize(260, 29))
+        self.filter_reset_filter.setMaximumSize(QtCore.QSize(205, 16777215))
+        icon = QtGui.QIcon()
+        icon.addPixmap(QtGui.QPixmap(":/menu-icons/assets/icons/menu-icons/menu-1/select-default.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        self.filter_reset_filter.setIcon(icon)
+        self.filter_reset_filter.setObjectName("filter_reset_filter")
+        self.filter_gridLayout_4.addWidget(self.filter_reset_filter, 1, 3, 1, 1)
 
-            self.filter_label_12 = QtWidgets.QLabel(self.filter_frame_13)
-            self.filter_label_12.setMinimumSize(QtCore.QSize(60, 0))
-            self.filter_label_12.setMaximumSize(QtCore.QSize(50, 16777215))
-            self.filter_label_12.setAlignment(QtCore.Qt.AlignCenter)
-            self.filter_label_12.setObjectName("filter_label_12")
-            self.filter_gridLayout_4.addWidget(self.filter_label_12, 0, 2, 1, 1)
+        self.filter_label_12 = QtWidgets.QLabel(self.filter_frame_13)
+        self.filter_label_12.setMinimumSize(QtCore.QSize(60, 0))
+        self.filter_label_12.setMaximumSize(QtCore.QSize(50, 16777215))
+        self.filter_label_12.setAlignment(QtCore.Qt.AlignCenter)
+        self.filter_label_12.setObjectName("filter_label_12")
+        self.filter_gridLayout_4.addWidget(self.filter_label_12, 0, 2, 1, 1)
 
-            self.filter_apply_filter = QtWidgets.QPushButton(self.filter_frame_13)
-            sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Maximum)
-            sizePolicy.setHorizontalStretch(0)
-            sizePolicy.setVerticalStretch(0)
-            sizePolicy.setHeightForWidth(self.filter_apply_filter.sizePolicy().hasHeightForWidth())
-            self.filter_apply_filter.setSizePolicy(sizePolicy)
-            self.filter_apply_filter.setMinimumSize(QtCore.QSize(260, 29))
-            self.filter_apply_filter.setMaximumSize(QtCore.QSize(205, 16777215))
-            icon1 = QtGui.QIcon()
-            icon1.addPixmap(QtGui.QPixmap(":/rest-icons/assets/icons/rest-icons/apply-filter.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
-            self.filter_apply_filter.setIcon(icon1)
-            self.filter_apply_filter.setObjectName("filter_apply_filter")
-            self.filter_gridLayout_4.addWidget(self.filter_apply_filter, 0, 3, 1, 1)
+        self.filter_apply_filter = QtWidgets.QPushButton(self.filter_frame_13)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Maximum)
+        sizePolicy.setHorizontalStretch(0)
+        sizePolicy.setVerticalStretch(0)
+        sizePolicy.setHeightForWidth(self.filter_apply_filter.sizePolicy().hasHeightForWidth())
+        self.filter_apply_filter.setSizePolicy(sizePolicy)
+        self.filter_apply_filter.setMinimumSize(QtCore.QSize(260, 29))
+        self.filter_apply_filter.setMaximumSize(QtCore.QSize(205, 16777215))
+        icon1 = QtGui.QIcon()
+        icon1.addPixmap(QtGui.QPixmap(":/rest-icons/assets/icons/rest-icons/apply-filter.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        self.filter_apply_filter.setIcon(icon1)
+        self.filter_apply_filter.setObjectName("filter_apply_filter")
+        self.filter_gridLayout_4.addWidget(self.filter_apply_filter, 0, 3, 1, 1)
 
-            self.filter_label_10 = QtWidgets.QLabel(self.filter_frame_13)
-            sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
-            sizePolicy.setHorizontalStretch(0)
-            sizePolicy.setVerticalStretch(0)
-            sizePolicy.setHeightForWidth(self.filter_label_10.sizePolicy().hasHeightForWidth())
-            self.filter_label_10.setSizePolicy(sizePolicy)
-            self.filter_label_10.setObjectName("filter_label_10")
-            self.filter_gridLayout_4.addWidget(self.filter_label_10, 0, 0, 1, 1)
+        self.filter_label_10 = QtWidgets.QLabel(self.filter_frame_13)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        sizePolicy.setHorizontalStretch(0)
+        sizePolicy.setVerticalStretch(0)
+        sizePolicy.setHeightForWidth(self.filter_label_10.sizePolicy().hasHeightForWidth())
+        self.filter_label_10.setSizePolicy(sizePolicy)
+        self.filter_label_10.setObjectName("filter_label_10")
+        self.filter_gridLayout_4.addWidget(self.filter_label_10, 0, 0, 1, 1)
 
-            self.filter_low_frequency = QtWidgets.QSpinBox(self.filter_frame_13)
-            self.filter_low_frequency.setMinimumSize(QtCore.QSize(0, 29))
-            self.filter_low_frequency.setMinimum(20)
-            self.filter_low_frequency.setMaximum(20000)
-            self.filter_low_frequency.setSingleStep(100)
-            self.filter_low_frequency.setValue(20)
-            self.filter_low_frequency.setObjectName("filter_low_frequency")
-            self.filter_gridLayout_4.addWidget(self.filter_low_frequency, 0, 1, 1, 1)
+        self.filter_low_frequency = QtWidgets.QSpinBox(self.filter_frame_13)
+        self.filter_low_frequency.setMinimumSize(QtCore.QSize(0, 29))
+        self.filter_low_frequency.setMinimum(20)
+        self.filter_low_frequency.setMaximum(20000)
+        self.filter_low_frequency.setSingleStep(100)
+        self.filter_low_frequency.setValue(20)
+        self.filter_low_frequency.setObjectName("filter_low_frequency")
+        self.filter_gridLayout_4.addWidget(self.filter_low_frequency, 0, 1, 1, 1)
 
-            self.filter_horizontalLayout.addWidget(self.filter_frame_13)
+        self.filter_horizontalLayout.addWidget(self.filter_frame_13)
 
-            self.filter_label_7.setText("Ζωνοπερατό φίλτρο:\n 20Hz-20000Hz")
-            self.filter_label_11.setText("Υψηλή συχνότητα αποκοπής:")
-            self.filter_label_13.setText("Hz")
-            self.filter_reset_filter.setText("Επαναφορά (20Hz - 20000Hz)")
-            self.filter_label_12.setText("Hz")
-            self.filter_apply_filter.setText("Εφαρμογή φίλτρου")
-            self.filter_label_10.setText("Χαμηλή συχνότητα αποκοπής:")
+        self.filter_label_7.setText("Ζωνοπερατό φίλτρο:\n 20Hz-20000Hz")
+        self.filter_label_11.setText("Υψηλή συχνότητα αποκοπής:")
+        self.filter_label_13.setText("Hz")
+        self.filter_reset_filter.setText("Επαναφορά (20Hz - 20000Hz)")
+        self.filter_label_12.setText("Hz")
+        self.filter_apply_filter.setText("Εφαρμογή φίλτρου")
+        self.filter_label_10.setText("Χαμηλή συχνότητα αποκοπής:")
 
 
-            # on low_frequency change
-            self.filter_low_frequency.valueChanged.connect(lambda low_frequency: self.low_frequency_changed(low_frequency))
+        # on low_frequency change
+        self.filter_low_frequency.valueChanged.connect(lambda low_frequency: self.low_frequency_changed(low_frequency))
 
-            # on high_frequency change
-            self.filter_high_frequency.valueChanged.connect(lambda high_frequency: self.high_frequency_changed(high_frequency))
+        # on high_frequency change
+        self.filter_high_frequency.valueChanged.connect(lambda high_frequency: self.high_frequency_changed(high_frequency))
 
-            # on apply filter
-            self.filter_apply_filter.clicked.connect(lambda state: self.apply_filter_method(state))
+        # on apply filter
+        self.filter_apply_filter.clicked.connect(lambda state: self.apply_filter_method(state))
 
-            # on reset filter
-            self.filter_reset_filter.clicked.connect(lambda state: self.reset_filter_method(state))
+        # on reset filter
+        self.filter_reset_filter.clicked.connect(lambda state: self.reset_filter_method(state))
 
-            filter_widget = QtWidgets.QWidgetAction(self.menu_for_filter)
-            filter_widget.setDefaultWidget(self.filter_frame)
-            self.menu_for_filter.addAction(filter_widget)
-        except:
-            error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+        filter_widget = QtWidgets.QWidgetAction(self.menu_for_filter)
+        filter_widget.setDefaultWidget(self.filter_frame)
+        self.menu_for_filter.addAction(filter_widget)
 
     def low_frequency_changed(self, low_frequency):
         try:
             self.filter_high_frequency.setMinimum(low_frequency)
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.filter_low_frequency.valueChanged.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def high_frequency_changed(self, high_frequency):
         try:
             self.filter_low_frequency.setMaximum(high_frequency)
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.filter_high_frequency.valueChanged.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def apply_filter_method(self, state):
         try:
@@ -677,8 +846,15 @@ class Deck_1:
             self.queue.put({"type": "low_frequency", "low_frequency_value": low_frequency})
             self.queue.put({"type": "high_frequency", "high_frequency_value": high_frequency})
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.filter_apply_filter.clicked.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def reset_filter_method(self, state):
         try:
@@ -689,11 +865,19 @@ class Deck_1:
             self.queue.put({"type": "low_frequency", "low_frequency_value": 20})
             self.queue.put({"type": "high_frequency", "high_frequency_value": 20000})
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            try:
+                self.filter_reset_filter.clicked.disconnect()
+            except:
+                pass
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def load_item(self,item):
         try:
+            import copy
             item = copy.deepcopy(item)
             if item is None:
                 return None
@@ -705,7 +889,12 @@ class Deck_1:
                     return self.check_radio_url(item)
 
             # 1. stop deck 1
-            self.main_self.deck_1_instance.stop_button_clicked(disable_extra_plays=False)
+            if self.play_retransmition:
+                self.stop_button_clicked(disable_extra_plays=False)
+                self.play_retransmition = True
+            else:
+                self.stop_button_clicked(disable_extra_plays=False)
+                self.play_retransmition = False
 
             # 2. change deck 1 title
             self.main_self.ui.deck_1_label_name.setText("Deck 1: "+item["title"])
@@ -825,10 +1014,8 @@ class Deck_1:
             self.normalize_checkBox.blockSignals(True)
             if self.item["normalize"]:
                 self.normalize_checkBox.setCheckState(QtCore.Qt.Checked)
-
             else:
                 self.normalize_checkBox.setCheckState(QtCore.Qt.Unchecked)
-
             self.normalize_checkBox.blockSignals(False)
 
             #10. set deck filter
@@ -844,11 +1031,21 @@ class Deck_1:
             # 11. load clip to process
             self.queue.put({"type": "load", "item": self.item})
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            self.play_retransmition = False
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def check_radio_url(self,item):
         try:
+            from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
+
+            from PyQt5.QtCore import QUrl
+            from io import BytesIO
+            import base64
+
             self.tmp_item = item
             self.tmp_item["url_ok"] = False
 
@@ -865,7 +1062,7 @@ class Deck_1:
                     print(error_message)
                 self.main_self.ui.deck_1_web.show()
                 self.web = QWebEngineView(self.main_self.ui.deck_1_web)
-                self.web.setPage(WebEnginePage(self.web))
+                self.web.setPage(Child_Proc.WebEnginePage(self.web))
 
                 self.web.load(QUrl(self.tmp_item["url"]))
                 self.page_loaded = False
@@ -877,9 +1074,12 @@ class Deck_1:
                 self.tmp_item["stream_url"] = self.tmp_item["url"]
                 self.queue.put({"type": "check-radio-url", "retransmition": self.tmp_item})
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            self.play_retransmition = False
             error_message = traceback.format_exc()
-            print(error_message)
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def clearLayout(self, layout):
         try:
@@ -888,8 +1088,12 @@ class Deck_1:
                 if child.widget():
                     child.widget().deleteLater()
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            self.play_retransmition = False
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def main_page_loaded_finished(self,ok):
         try:
@@ -904,11 +1108,16 @@ class Deck_1:
                     self.page_loaded = True
                     self.main_self.open_deck_1_web_error_window(self.tmp_item)
         except:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.stop_button_clicked()
+            self.play_retransmition = False
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def javascript_runned(self, radio_url):
         try:
+            import base64
             if radio_url is None:
                 radio_url = ""
             if "www" in radio_url or "http" in radio_url:
@@ -925,61 +1134,43 @@ class Deck_1:
 
             self.tmp_item["stream_url"] = radio_url
             self.queue.put({"type": "check-radio-url", "retransmition": self.tmp_item})
+            from PyQt5.QtCore import QUrl
             self.web.load(QUrl(""))
         except Exception as e:
+            self.put_to_q = False
+            self.queue.put({'type': 'put_to_q', 'put_to_q': False})
+            self.play_retransmition = False
             error_message = traceback.format_exc()
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
     def close(self):
         try:
-            self.stop_button_clicked(disable_extra_plays=True)
-            self.child_process.terminate()
-            self.emitter.quit()
-            while(self.queue.qsize()!=0):
-                _ = self.queue.get()
-
-            counter = 0
-            for process in self.main_self.manage_processes_instance.processes:
-                if "process_number" in process:
-                    if process["process_number"] == self.process_number:
-                        self.main_self.manage_processes_instance.processes[counter]["pid"] = None
-                        self.main_self.manage_processes_instance.processes[counter]["start_datetime"] = None
-                        self.main_self.manage_processes_instance.processes[counter]["status"] = "stopped"
-                        self.main_self.manage_processes_instance.processes[counter]["cpu"] = 0
-                        self.main_self.manage_processes_instance.processes[counter]["ram"] = 0
-                counter += 1
-            if self.main_self.manage_proccesses_window_is_open:
-                self.main_self.manage_proccesses_window_support_code.manage_proccesses_queue.put(
-                    {"type": "table-update", "processes": self.main_self.manage_processes_instance.processes})
-        except:
+            #self.queue.put({"type": "new-status", "status": self.deck_status})
+            # Finalize processes
+            manage_processes_class.deinit_process(self)
+        except Exception as e:
             error_message = traceback.format_exc()
-            print(error_message)
-            self.main_self.open_deck_1_error_window(error_message)
+            self.open_error_window(error_message)
 
 class Emitter(QThread):
-    try:
-        error_signal = pyqtSignal(str)
-        deck_1_ready = pyqtSignal(AudioSegment)
-        volume_amplitude = pyqtSignal(float)
-        current_duration_milliseconds = pyqtSignal(int)
-        deck_finished = pyqtSignal()
-        chunk_number_answer = pyqtSignal(int)
-        url_check_result = pyqtSignal(bool, dict)
-        fade_out_start = pyqtSignal()
-    except:
-        pass
+    from pydub import AudioSegment as pd
+    error_signal = pyqtSignal(str)
+    deck_1_ready = pyqtSignal(pd)
+    volume_amplitude = pyqtSignal(float)
+    current_duration_milliseconds = pyqtSignal(int)
+    deck_finished = pyqtSignal()
+    chunk_number_answer = pyqtSignal(int)
+    url_check_result = pyqtSignal(bool, dict)
+    fade_out_start = pyqtSignal()
+    fade_in_stop = pyqtSignal()
 
     def __init__(self, from_process: Pipe):
-        try:
-            super().__init__()
-            self.data_from_process = from_process
-        except:
-            error_message = traceback.format_exc()
-            self.error_signal.emit(error_message)
+        super().__init__()
+        self.data_from_process = from_process
 
     def run(self):
-        try:
-            while True:
+        while True:
+            try:
                 data = self.data_from_process.recv()
                 if data["type"] == "error":
                     self.error_signal.emit(data["error_message"])
@@ -997,58 +1188,133 @@ class Emitter(QThread):
                     self.url_check_result.emit(data["result"], data["retransmition"])
                 elif data["type"] == "fade-out-start":
                     self.fade_out_start.emit()
-        except:
-            error_message = traceback.format_exc()
-            self.error_signal.emit(error_message)
+                elif data["type"] == "fade-in-stop":
+                    self.fade_in_stop.emit()
+                elif data["type"] == "close":
+                    return None
+            except:
+                error_message = traceback.format_exc()
+                self.error_signal.emit(error_message)
+                return None
 
 class Child_Proc(Process):
-
-    def __init__(self, to_emitter, from_mother,condition, frame_number, quit_event):
+    from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
+    def __init__(self, to_emitter, from_mother,deck_1_queue,condition, frame_number, quit_event,start_condition,start_flag,configuration,continue_condition,continue_flag,deck_1_condition,deck_1_flag,pre_quit_event):
         try:
             super().__init__()
             self.daemon = False
             self.to_emitter = to_emitter
             self.data_from_mother = from_mother
+            self.deck_1_queue = deck_1_queue
+            self.pre_quit_event = pre_quit_event
             self.condition = condition
             self.frame_number = frame_number
             self.quit_event = quit_event
+            self.start_condition = start_condition
+            self.start_flag = start_flag
+            self.continue_condition = continue_condition
+            self.continue_flag = continue_flag
+            self.deck_1_condition = deck_1_condition
+            self.deck_1_flag = deck_1_flag
+            self.configuration = configuration
             self.deck_status = "stopped"
-            self.volume = 100
-            self.pan = 0
-            self.normalize = 0
-            self.low_frequency = 20
-            self.high_frequency = 20000
+            self.volume = self.configuration["volume"]
+            self.pan = self.configuration["pan"]
+            self.normalize = self.configuration["normalize"]
+            self.low_frequency = self.configuration["low_frequency"]
+            self.high_frequency = self.configuration["high_frequency"]
             self.item = None
             self.current_duration_milliseconds = 0
             self.chunk_number = 0
-            self.packet_time = 125
+            self.packet_time = self.configuration["packet_time_ms"]
             self.fade_out_emitted = False
+            self.fade_out_now = False
+            self.fade_out_now_remaining_time_milliseconds = self.configuration["fade_now_duration_ms"]
+            self.put_to_q = True
 
             if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
                 # exe
                 self.ffmpeg_path = os.path.abspath("extra-files/ffmpeg/ffmpeg.exe")
             else:
-                self.ffmpeg_path = os.path.abspath("exe/extra-files/ffmpeg/ffmpeg.exe")
+                self.ffmpeg_path = os.path.abspath("../../../exe/extra-files/ffmpeg/ffmpeg.exe")
+            self.ensure_process_not_running("ffmpeg.exe")
         except:
+            error_message = str(traceback.format_exc())
+            to_emitter.put({"type": "error", "error_message": error_message})
+            os._exit(1)
+
+    def ensure_process_not_running(self, process_name):
+        try:
+            """
+            Ensures that the specified process is not running on the system using PowerShell.
+            """
+            import subprocess
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
             try:
-                error_message = str(traceback.format_exc())
-                to_emitter.send({"type": "error", "error_message": error_message})
-            except:
-                pass
+                # Use PowerShell to get processes by name and terminate them
+                cmd = f'powershell -Command "Get-Process -Name \'{process_name.split(".")[0]}\' -ErrorAction SilentlyContinue | Stop-Process -Force"'
+                result = subprocess.run(cmd, startupinfo=si, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+                if result.returncode == 0:
+                    print(f"Successfully terminated process: {process_name}")
+                else:
+                    pass
+                    #print(f"No running process found or error terminating: {process_name}")
+            except Exception as e:
+                print(f"Error while terminating process {process_name}: {e}")
+        except:
+            error_message = traceback.format_exc()
+            self.to_emitter.put({"type": "error", "error_message": error_message})
+
 
     def run(self):
         try:
-            self.database_functions = database_functions
+            import time
+            from pydub import AudioSegment, effects, utils
+
             self.fetch_player_list_settings()
-            current_frame = 0
-            while (True):
+
+            with self.start_condition:
+                self.frame_number.value += 1
+                self.current_frame = self.frame_number.value
+                self.start_condition.wait_for(lambda: self.start_flag.value)
+
+            while (not self.quit_event.is_set()) and (not self.pre_quit_event.is_set()):
+
                 with self.condition:
-                    self.condition.wait_for(lambda: current_frame <= self.frame_number.value)
-                    if self.quit_event.is_set():
-                        return None
-                self.one_chunk()
-                current_frame += 1
-        except:
+                    self.condition.wait_for(lambda: self.current_frame < self.frame_number.value or self.pre_quit_event.is_set())
+                    if self.pre_quit_event.is_set():
+                        break
+
+                with self.deck_1_condition:
+                    self.deck_1_flag.value = True
+                    self.deck_1_condition.notify_all()
+
+                with self.continue_condition:
+                    self.continue_condition.wait_for(lambda: self.continue_flag.value or self.pre_quit_event.is_set())
+                    if self.pre_quit_event.is_set():
+                        break
+
+                    result = self.one_chunk()  # Process one chunk of data
+                    if result == "close":
+                        break
+
+                    self.current_frame += 1
+
+                    with self.deck_1_condition:
+                        self.deck_1_flag.value = False
+                        self.deck_1_condition.notify_all()
+
+            while (self.data_from_mother.qsize() > 0):
+                _ = self.data_from_mother.get()
+            self.data_from_mother.put({"type": "new-status", "status": 'stopped'})
+            self.data_from_mother.put({"type": "close"})
+            r = self.one_chunk()
+            self.to_emitter.send({'type': 'close'})
+            return
+        except Exception as e:
             error_message = str(traceback.format_exc())
             self.to_emitter.send({"type": "error", "error_message": error_message})
 
@@ -1075,15 +1341,21 @@ class Child_Proc(Process):
 
     def one_chunk(self):
         try:
+            from pydub import AudioSegment,effects,utils
+            import time
             q_size = self.data_from_mother.qsize()
             if q_size > 0:
                 data = self.data_from_mother.get()
             else:
                 data = None
             if data is not None:
+                if data["type"] == "close":
+                    return "close"
                 if data["type"] == "volume":
                     self.volume = data["value_base_100"]
                     self.update_item()
+                elif data["type"] == "put_to_q":
+                    self.put_to_q = data['put_to_q']
                 elif data["type"] == "pan":
                     self.pan = data["pan_value"]
                     self.update_item()
@@ -1119,12 +1391,16 @@ class Child_Proc(Process):
                                 self.stop_retransmition()
                     else:
                         self.fade_out_emitted = False
+                        self.fade_out_now = False
+                        self.fade_out_now_remaining_time_milliseconds = 0
                         self.chunk_number = 0
                         self.current_duration_milliseconds = 0
                         if self.item is not None:
                             if self.item["type"] == "retransmitions":
                                 self.stop_retransmition()
                 elif data["type"] == "load":
+                    self.fade_out_now = False
+                    self.fade_out_now_remaining_time_milliseconds = 0
                     self.fade_out_emitted = False
                     self.deck_status = "stopped"
                     self.update_player_history(self.deck_status)
@@ -1148,12 +1424,14 @@ class Child_Proc(Process):
                     self.fade_out_emitted = False
                     self.audio_segment = data["audio_segment"]
                     self.total_duration_milliseconds = self.item["duration_milliseconds"]
-
                     try:
                         self.read_mp3.join()
                         del self.read_mp3
                     except:
                         pass
+                elif data["type"] == "fade-out-now":
+                    self.fade_out_now = True
+                    self.fade_out_now_remaining_time_milliseconds = self.configuration["fade_now_duration_ms"]
             if self.item is not None:
                 if self.item["type"] != "retransmitions":
                     if self.audio_segment == "not-ready":
@@ -1162,6 +1440,8 @@ class Child_Proc(Process):
                         return None
                 if self.current_duration_milliseconds >= self.total_duration_milliseconds:
                     self.fade_out_emitted = False
+                    self.fade_out_now = False
+                    self.fade_out_now_remaining_time_milliseconds = 0
                     self.to_emitter.send({"type": "deck_finished"})
                     self.deck_status = "stopped"
                     self.update_player_history(self.deck_status)
@@ -1178,6 +1458,8 @@ class Child_Proc(Process):
                                 slice = self.audio_segment[self.chunk_number * (self.packet_time):]
                             else:
                                 self.fade_out_emitted = False
+                                self.fade_out_now = False
+                                self.fade_out_now_remaining_time_milliseconds = 0
                                 slice = AudioSegment.empty()
                                 self.deck_status = "stopped"
                                 self.update_player_history(self.deck_status)
@@ -1200,11 +1482,33 @@ class Child_Proc(Process):
                     except:
                         pass
                     volume = self.volume
-                    if self.total_duration_milliseconds > 5000:
-                        if self.chunk_number*self.packet_time<5000 and self.player_list_settings["player_fade_in"]:
-                            volume = volume*self.fade_in(self.chunk_number*self.packet_time)
-                        if self.chunk_number*self.packet_time>self.total_duration_milliseconds-5000 and self.player_list_settings["player_fade_out"]:
-                            volume = volume*self.fade_out(self.chunk_number*self.packet_time,self.total_duration_milliseconds)
+                    if self.fade_out_now == False:
+                        if self.total_duration_milliseconds > self.configuration["fade_out_duration_ms"]:
+                            if self.chunk_number*self.packet_time<self.configuration["fade_in_duration_ms"] and self.player_list_settings["player_fade_in"]:
+                                volume = volume*self.fade_in(self.chunk_number*self.packet_time)
+                                if self.chunk_number==int(self.configuration["fade_in_duration_ms"]/self.configuration["packet_time_ms"])-1:
+                                    self.to_emitter.send({"type":"fade-in-stop"})
+                            if self.chunk_number*self.packet_time>self.total_duration_milliseconds-self.configuration["fade_out_duration_ms"] and self.player_list_settings["player_fade_out"]:
+                                volume = volume*self.fade_out(self.chunk_number*self.packet_time,self.total_duration_milliseconds)
+                    else:
+                        if self.fade_out_now_remaining_time_milliseconds<0:
+                            #deck finished now - fade out now stop
+                            self.fade_out_now = False
+                            self.fade_out_now_remaining_time_milliseconds = 0
+                            slice = AudioSegment.empty()
+                            self.deck_status = "stopped"
+                            self.update_player_history(self.deck_status)
+                            self.to_emitter.send({"type": "volume_amplitude", "normalized_value": 0})
+                            self.to_emitter.send({"type": "current_duration_milliseconds","duration": self.current_duration_milliseconds})
+                            self.to_emitter.send({"type": "slice", "slice": slice})
+                            self.to_emitter.send({"type": "deck_finished"})
+                            self.chunk_number = 0
+                            self.current_duration_milliseconds = 0
+                            return None
+                        else:
+                            self.fade_out_now_remaining_time_milliseconds -= self.configuration["packet_time_ms"]
+                            volume = volume * self.fade_out_now_method(self.fade_out_now_remaining_time_milliseconds)
+
                     if (volume == 0):
                         db_volume = -200
                     else:
@@ -1227,27 +1531,37 @@ class Child_Proc(Process):
                     self.now = datetime.now()
 
                     self.chunk_number += 1
-                    if (self.chunk_number*self.packet_time>=self.total_duration_milliseconds-5000) and (self.player_list_settings["player_fade_out"] or self.player_list_settings["player_fade_in"]):
-                        if self.fade_out_emitted == False:
-                            self.fade_out_emitted = True
-                            self.to_emitter.send({"type":"fade-out-start"})
+                    if self.fade_out_now == False:
+                        if (self.chunk_number*self.packet_time>=self.total_duration_milliseconds-self.configuration["fade_out_duration_ms"]) and (self.player_list_settings["player_fade_out"] or self.player_list_settings["player_fade_in"]):
+                            if self.fade_out_emitted == False:
+                                self.fade_out_emitted = True
+                                self.to_emitter.send({"type":"fade-out-start"})
+                        else:
+                            if "player_list_settings_previous" in dir(self):
+                                if (self.chunk_number * self.packet_time >= self.total_duration_milliseconds - self.configuration["fade_out_duration_ms"]) and (
+                                        self.player_list_settings_previous["player_fade_out"] or self.player_list_settings_previous[
+                                    "player_fade_in"]):
+                                    if self.fade_out_emitted == False:
+                                        self.fade_out_emitted = True
+                                        self.to_emitter.send({"type": "fade-out-start"})
+                                        del self.player_list_settings_previous
                     else:
-                        if "player_list_settings_previous" in dir(self):
-                            if (self.chunk_number * self.packet_time >= self.total_duration_milliseconds - 5000) and (
-                                    self.player_list_settings_previous["player_fade_out"] or self.player_list_settings_previous[
-                                "player_fade_in"]):
-                                if self.fade_out_emitted == False:
-                                    self.fade_out_emitted = True
-                                    self.to_emitter.send({"type": "fade-out-start"})
-                                    del self.player_list_settings_previous
+                        if self.fade_out_now_remaining_time_milliseconds == self.configuration["fade_now_duration_ms"] - self.configuration["packet_time_ms"]:
+                            # fade out start emit to start the fade in effect
+                            self.to_emitter.send({"type": "fade-out-start"})
 
                     self.current_duration_milliseconds += chunk_time
 
                     self.to_emitter.send({"type": "current_duration_milliseconds", "duration": self.current_duration_milliseconds})
-                    self.to_emitter.send({"type": "slice", "slice": slice})
+                    #self.to_emitter.send({"type": "slice", "slice": slice})
+                    if self.put_to_q:
+                        while(self.deck_1_queue.qsize()>=10):
+                            time.sleep(self.configuration['packet_time_ms']/10000)
+                        self.deck_1_queue.put({"type": "slice", "slice": slice})
         except:
-            error_message = traceback.format_exc()
+            error_message = str(traceback.format_exc())
             self.to_emitter.send({"type": "error", "error_message": error_message})
+            os._exit(1)
 
     def update_item(self):
         try:
@@ -1278,6 +1592,8 @@ class Child_Proc(Process):
             if os.path.exists("deck_1_retransmition_check.mp3"):
                 os.remove("deck_1_retransmition_check.mp3")
 
+            self.ensure_process_not_running('ffmpeg.exe')
+            from subprocess import Popen, PIPE
             self.p1 = Popen([self.ffmpeg_path, '-y', '-t', '10', '-loglevel', 'quiet', '-i', stream_url,'deck_1_retransmition_check.mp3'], stdout=PIPE, stdin=PIPE,stderr=PIPE, shell=True)
             self.p1.wait()
             self.p1.communicate(b"q")
@@ -1291,7 +1607,8 @@ class Child_Proc(Process):
             else:
                 return False
         except Exception as e:
-            print(e)
+            error_message = str(traceback.format_exc())
+            self.to_emitter.send({"type": "error", "error_message": error_message})
             return False
 
     def update_player_history(self,deck_status):
@@ -1322,6 +1639,8 @@ class Child_Proc(Process):
     def start_retransmition(self):
         try:
             self.stop_retransmition()
+            self.ensure_process_not_running('ffmpeg.exe')
+            from subprocess import Popen, PIPE
             self.deck_1_ffmpeg_retransmition = Popen([self.ffmpeg_path, '-y', '-loglevel', 'quiet', '-i', self.item["stream_url"],'deck_1_retransmition.mp3'], stdin=PIPE, stdout=PIPE, stderr=PIPE)
         except:
             error_message = traceback.format_exc()
@@ -1353,6 +1672,7 @@ class Child_Proc(Process):
 
     def load_segment(self):
         try:
+            from pydub import AudioSegment,effects,utils
             if "type" in self.item:
                 relative_type = self.item["type"]
             elif "relative_type" in self.item:
@@ -1397,10 +1717,11 @@ class Child_Proc(Process):
 
     def read_retransmition_slice(self):
         try:
+            from pydub import AudioSegment, effects, utils
             if self.deck_status != "playing":
                 return AudioSegment.empty()
-            self.packet_size = 4096
-            self.new_sample_rate = 44800
+            self.packet_size = self.configuration["retransmition_packet_size"]
+            self.new_sample_rate = self.configuration["retransmition_sample_rate"]
 
             if os.path.exists("deck_1_retransmition.mp3"):
                 if "retransmition_file" not in dir(self):
@@ -1412,7 +1733,7 @@ class Child_Proc(Process):
                         chunk = self.retransmition_file.read(32 * self.packet_size)
                         if not chunk:
                             return AudioSegment.empty()
-
+                    from io import BytesIO
                     chunk = BytesIO(chunk)
                     success = False
                     while (success == False):
@@ -1432,14 +1753,15 @@ class Child_Proc(Process):
 
             else:
                 return AudioSegment.empty()
-
             return slice
         except:
             error_message = traceback.format_exc()
             self.to_emitter.send({"type": "error", "error_message": error_message})
+            return AudioSegment.silent(self.configuration["packet_time_ms"],self.new_sample_rate)
 
     def normalize_method(self, seg, headroom):
         try:
+            from pydub import AudioSegment, effects, utils
             peak_sample_val = seg.max
 
             # if the max is 0, this audio segment is silent, and can't be normalized
@@ -1447,52 +1769,68 @@ class Child_Proc(Process):
                 return seg
 
             target_peak = seg.max_possible_amplitude * utils.db_to_float(-headroom)
-            # target_peak = seg.max_possible_amplitude * (percent_headroom)
 
             needed_boost = utils.ratio_to_db(target_peak / peak_sample_val)
             return seg.apply_gain(needed_boost)
         except:
             error_message = traceback.format_exc()
-            print(error_message)
             self.to_emitter.send({"type": "error", "error_message": error_message})
             return seg
 
     def fade_in(self,time_milliseconds):
         try:
-            if time_milliseconds>5000:
+            if time_milliseconds>self.configuration["fade_in_duration_ms"]:
                 return 1
             elif time_milliseconds == 0:
                 return 0
             else:
                 fade_in = 3*time_milliseconds
                 fade_in = fade_in ** (1./3)
-                fade_in = fade_in / ((15000) ** (1./3))
+                fade_in = fade_in / ((3*self.configuration["fade_in_duration_ms"]) ** (1./3))
                 return fade_in
         except:
             error_message = traceback.format_exc()
             self.to_emitter.send({"type": "error", "error_message": error_message})
+            return 1
 
     def fade_out(self,time_milliseconds,total_duration_milliseconds):
         try:
             if time_milliseconds>=total_duration_milliseconds:
                 return 0
-            elif time_milliseconds<total_duration_milliseconds-5000:
+            elif time_milliseconds<total_duration_milliseconds-self.configuration["fade_out_duration_ms"]:
                 return 1
             else:
                 fade_out = total_duration_milliseconds - time_milliseconds
                 fade_out = fade_out*3
                 fade_out = fade_out ** (1./3)
-                fade_out = fade_out / ((15000) ** (1. / 3))
+                fade_out = fade_out / ((3*self.configuration["fade_out_duration_ms"]) ** (1. / 3))
+                return fade_out
+        except:
+            error_message = traceback.format_exc()
+            self.to_emitter.send({"type": "error", "error_message": error_message})
+            return 0
+
+    def fade_out_now_method(self,remaining_time):
+        try:
+            if remaining_time<=0:
+                return 0
+            else:
+                fade_out = remaining_time
+                fade_out = fade_out*3
+                fade_out = fade_out ** (1./3)
+                fade_out = fade_out / ((3*self.configuration["fade_now_duration_ms"]) ** (1. / 3))
                 return fade_out
         except:
             error_message = traceback.format_exc()
             self.to_emitter.send({"type": "error", "error_message": error_message})
 
-class WebEnginePage(QWebEnginePage):
-	def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
-		pass
+    class WebEnginePage(QWebEnginePage):
+
+        def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
+            pass
 
 class Custom_QFrame(QtWidgets.QFrame):
+
     def __init__(self, parent, *args, **kwargs):
         super(QtWidgets.QFrame, self).__init__(parent, *args, **kwargs)
 
