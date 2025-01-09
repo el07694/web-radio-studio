@@ -78,9 +78,6 @@
       <property name="styleSheet">
        <string notr="true"/>
       </property>
-      <property name="currentIndex">
-       <number>0</number>
-      </property>
       <widget class="QWidget" name="page_1">
        <property name="sizePolicy">
         <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
@@ -6145,9 +6142,6 @@ QStackedWidget &gt; QWidget::previous-button {
 QStackedWidget &gt; QWidget{
 background: white;
 }</string>
-             </property>
-             <property name="currentIndex">
-              <number>0</number>
              </property>
              <widget class="QWidget" name="blank_page">
               <property name="statusTip">
