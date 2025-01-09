@@ -4904,8 +4904,6 @@ class Ui_MainWindow(object):
         self.toolBar.addAction(self.action_contact)
 
         self.retranslateUi(MainWindow)
-        self.stackedWidget.setCurrentIndex(0)
-        self.page_3_stackedWidget.setCurrentIndex(0)
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
         MainWindow.setTabOrder(self.deck_1_play_or_pause, self.deck_1_stop)
         MainWindow.setTabOrder(self.deck_1_stop, self.deck_1_volume)
