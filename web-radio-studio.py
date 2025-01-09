@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Form implementation generated from reading ui file 'web-radio-studio.ui'
+# Form implementation generated from reading ui file 'C:\Users\cpapp\Documents\My Projects\web-radio-studio\ui/main-window/web-radio-studio.ui'
 #
 # Created by: PyQt5 UI code generator 5.15.11
 #
@@ -6091,7 +6091,12 @@ class Ui_MainWindow(object):
         self.action_move_stacked_widgets_items.setStatusTip(_translate("MainWindow", "Επιλογή θέματος"))
         self.menu_select_camera.setText(_translate("MainWindow", "Ρύθμιση κάμερας"))
         self.action_select_camera.setText(_translate("MainWindow", "Ρύθμιση κάμερας"))
-import icons_rc
+import os
+import importlib
+import sys
+sys.path.append(os.path.abspath("../../../src/compiled-ui/"))
+
+icons = importlib.import_module('icons')
 
 
 if __name__ == "__main__":
